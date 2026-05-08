@@ -127,3 +127,4 @@ def convert():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
