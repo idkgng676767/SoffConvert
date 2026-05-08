@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SOFFICE Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="brand-name">SOFFICE Converter</span>
+          <span class="brand-meta">Free · Local · No ads</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="card fu">
+        <p class="chip">Paste-free local conversion</p>
+        <h1>Convert documents without <em>the headache.</em></h1>
+        <p class="sub">
+          Upload a file, choose your target format, and download the converted result.
+        </p>
+
+        {% if error %}
+        <div class="alert" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <form action="{{ url_for('convert') }}" method="post" enctype="multipart/form-data" class="form-grid">
+          <label for="file">File</label>
+          <input id="file" name="file" type="file" required />
+
+          <label for="target_format">Output format</label>
+          <input
+            id="target_format"
+            name="target_format"
+            type="text"
+            list="format-suggestions"
+            placeholder="e.g. pdf, docx, xlsx, txt, html"
+            required
+          />
+          <datalist id="format-suggestions">
+            {% for fmt in common_formats %}
+            <option value="{{ fmt }}"></option>
+            {% endfor %}
+          </datalist>
+
+          <button type="submit">Convert file</button>
+        </form>
+
+        <p class="hint">
+          Advanced format strings also work (for example
+          <code>pdf:writer_pdf_Export</code>).
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
