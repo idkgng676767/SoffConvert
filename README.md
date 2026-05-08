@@ -14,10 +14,10 @@ Upload a document, choose an output format, and download the converted result fr
 
 ## Project Structure
 
-- `/home/runner/work/SoffConvert/SoffConvert/app.py` — Flask app and conversion logic
-- `/home/runner/work/SoffConvert/SoffConvert/templates/index.html` — UI template
-- `/home/runner/work/SoffConvert/SoffConvert/static/styles.css` — Styling
-- `/home/runner/work/SoffConvert/SoffConvert/requirements.txt` — Python dependencies
+- `app.py` — Flask app and conversion logic
+- `templates/index.html` — UI template
+- `static/styles.css` — Styling
+- `requirements.txt` — Python dependencies
 
 ## Requirements
 
@@ -37,7 +37,7 @@ soffice --version
 3. Install Python dependencies.
 
 ```bash
-cd /home/runner/work/SoffConvert/SoffConvert
+cd SoffConvert
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 ## Run
 
 ```bash
-cd /home/runner/work/SoffConvert/SoffConvert
+cd SoffConvert
 python app.py
 ```
 
@@ -82,4 +82,4 @@ The app returns clear form errors for:
 
 ## License
 
-This project is licensed under the MIT License. See `/home/runner/work/SoffConvert/SoffConvert/LICENSE`.
+This project is licensed under the MIT License. See `LICENSE`.
