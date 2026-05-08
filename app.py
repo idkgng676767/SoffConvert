@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import tempfile
@@ -28,7 +27,7 @@ COMMON_FORMATS = [
     "jpg",
 ]
 
-FORMAT_PATTERN = re.compile(r"^[a-z0-9._:+-]+$")
+ALLOWED_FORMATS = set(COMMON_FORMATS)
 
 
 def normalize_target_format(raw_value: str) -> str:
@@ -36,11 +35,9 @@ def normalize_target_format(raw_value: str) -> str:
     if normalized.startswith("."):
         normalized = normalized[1:]
     if not normalized:
-        raise ValueError("Please provide an output format.")
-    if not FORMAT_PATTERN.match(normalized):
-        raise ValueError(
-            "Invalid output format. Use values like pdf, docx, xlsx, txt, html, or pdf:writer_pdf_Export."
-        )
+        raise ValueError("Please choose an output format.")
+    if normalized not in ALLOWED_FORMATS:
+        raise ValueError("Please choose one of the formats from the dropdown.")
     return normalized
 
 
@@ -70,29 +67,34 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
     return converted_files[0]
 
 
+def render_index(error: str | None = None, selected_format: str = ""):
+    normalized_selected = selected_format.strip().lower().lstrip(".")
+    if normalized_selected not in ALLOWED_FORMATS:
+        normalized_selected = ""
+    return render_template(
+        "index.html",
+        common_formats=COMMON_FORMATS,
+        error=error,
+        selected_format=normalized_selected,
+    )
+
+
 @app.get("/")
 def index():
-    return render_template("index.html", common_formats=COMMON_FORMATS, error=None)
+    return render_index()
 
 
 @app.post("/convert")
 def convert():
     upload = request.files.get("file")
+    selected_format = request.form.get("target_format", "")
     if upload is None or upload.filename.strip() == "":
-        return render_template(
-            "index.html",
-            common_formats=COMMON_FORMATS,
-            error="Please choose a file to convert.",
-        ), 400
+        return render_index(error="Please choose a file to convert.", selected_format=selected_format), 400
 
     try:
-        target_format = normalize_target_format(request.form.get("target_format", ""))
+        target_format = normalize_target_format(selected_format)
     except ValueError as error:
-        return render_template(
-            "index.html",
-            common_formats=COMMON_FORMATS,
-            error=str(error),
-        ), 400
+        return render_index(error=str(error), selected_format=selected_format), 400
 
     filename = secure_filename(upload.filename)
     if not filename:
@@ -108,11 +110,7 @@ def convert():
         converted_path = convert_with_soffice(input_path, output_dir, target_format)
     except RuntimeError as error:
         shutil.rmtree(working_dir, ignore_errors=True)
-        return render_template(
-            "index.html",
-            common_formats=COMMON_FORMATS,
-            error=str(error),
-        ), 500
+        return render_index(error=str(error), selected_format=target_format), 500
 
     download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
     response = send_file(

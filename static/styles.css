@@ -149,7 +149,7 @@ label {
 }
 
 input[type="file"],
-input[type="text"] {
+select {
   width: 100%;
   border: 1.5px solid var(--border);
   border-radius: 10px;
@@ -159,6 +159,13 @@ input[type="text"] {
   font-family: "DM Sans", sans-serif;
   font-size: 14px;
   transition: border-color 0.15s, box-shadow 0.15s, opacity 0.12s;
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 42px;
+  cursor: pointer;
 }
 
 input::placeholder {
@@ -177,10 +184,28 @@ input[type="file"]::file-selector-button {
   cursor: pointer;
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: none;
   border-color: var(--toffee);
   box-shadow: 0 0 0 3px rgba(139, 94, 60, 0.12);
+}
+
+.select-wrap {
+  position: relative;
+}
+
+.select-wrap::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--ink-faint);
+  border-bottom: 2px solid var(--ink-faint);
+  transform: translateY(-65%) rotate(45deg);
+  pointer-events: none;
 }
 
 button {

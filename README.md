@@ -8,8 +8,8 @@ Upload a document, choose an output format, and download the converted result fr
 - Local conversion using your own LibreOffice installation
 - Web interface for quick one-file-at-a-time conversion
 - Supports common output formats (PDF, DOCX, ODT, RTF, TXT, HTML, XLSX, ODS, CSV, PPTX, ODP, PNG, JPG)
-- Supports advanced LibreOffice format strings (for example `pdf:writer_pdf_Export`)
-- Basic input validation for output format values
+- Uses a dropdown menu for output format selection
+- Validates output format against supported dropdown values
 - Upload size limit set to 200 MB
 
 ## Project Structure
@@ -55,15 +55,15 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 ## Usage
 
 1. Select a file to upload.
-2. Enter a target output format (for example `pdf`, `docx`, `xlsx`, `txt`).
+2. Choose a target output format from the dropdown menu.
 3. Click **Convert file**.
 4. Download the converted file returned by the app.
 
 ### Output format notes
 
-- You can enter plain extensions (like `pdf` or `docx`) or advanced LibreOffice filter strings.
+- Supported format values are the options shown in the dropdown.
 - Format values are normalized to lowercase, and a leading `.` is removed.
-- Invalid format strings are rejected.
+- Invalid or unsupported format values are rejected.
 
 ## Error Handling
 
