@@ -47,7 +47,7 @@ def parse_upload_limit(raw_value: str | None, default_value: int) -> int:
     return total_bytes
 
 
-def parse_non_negative_int(raw_value: str | None, default_value: int) -> int:
+def parse_nonnegative_int(raw_value: str | None, default_value: int) -> int:
     if raw_value is None:
         return default_value
     normalized = str(raw_value).strip()
@@ -100,23 +100,23 @@ DEFAULT_SOFFICE_TIMEOUT_SECONDS = 300
 DEFAULT_RATE_LIMIT_REQUESTS = 30
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
 
-MAX_CONCURRENT_CONVERSIONS = parse_non_negative_int(
+MAX_CONCURRENT_CONVERSIONS = parse_nonnegative_int(
     os.getenv("MAX_CONCURRENT_CONVERSIONS"),
     DEFAULT_MAX_CONCURRENT_CONVERSIONS,
 )
-MAX_CONVERSION_WAIT_SECONDS = parse_non_negative_int(
+MAX_CONVERSION_WAIT_SECONDS = parse_nonnegative_int(
     os.getenv("MAX_CONVERSION_WAIT_SECONDS"),
     DEFAULT_CONVERSION_WAIT_SECONDS,
 )
-SOFFICE_TIMEOUT_SECONDS = parse_non_negative_int(
+SOFFICE_TIMEOUT_SECONDS = parse_nonnegative_int(
     os.getenv("SOFFICE_TIMEOUT_SECONDS"),
     DEFAULT_SOFFICE_TIMEOUT_SECONDS,
 )
-RATE_LIMIT_REQUESTS = parse_non_negative_int(
+RATE_LIMIT_REQUESTS = parse_nonnegative_int(
     os.getenv("RATE_LIMIT_REQUESTS"),
     DEFAULT_RATE_LIMIT_REQUESTS,
 )
-RATE_LIMIT_WINDOW_SECONDS = parse_non_negative_int(
+RATE_LIMIT_WINDOW_SECONDS = parse_nonnegative_int(
     os.getenv("RATE_LIMIT_WINDOW_SECONDS"),
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
 )
@@ -164,7 +164,7 @@ def normalize_target_format(raw_value: str) -> str:
     return safe_format
 
 
-def get_client_identifier() -> str:
+def get_client_ip() -> str:
     if TRUST_PROXY_HEADERS:
         forwarded = request.headers.get("X-Forwarded-For", "")
         if forwarded:
@@ -305,7 +305,7 @@ def convert():
         return render_index(error=str(error), selected_format=selected_format), 400
 
     slot_acquired = False
-    client_id = get_client_identifier()
+    client_id = get_client_ip()
     if is_rate_limited(client_id):
         return render_index(
             error="Too many requests. Please wait a moment and try again.",
