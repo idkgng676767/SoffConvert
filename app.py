@@ -97,7 +97,7 @@ MAX_CONCURRENT_CONVERSIONS = parse_non_negative_int(
     os.getenv("MAX_CONCURRENT_CONVERSIONS"),
     DEFAULT_MAX_CONCURRENT_CONVERSIONS,
 )
-CONVERSION_WAIT_SECONDS = parse_non_negative_int(
+MAX_CONVERSION_WAIT_SECONDS = parse_non_negative_int(
     os.getenv("MAX_CONVERSION_WAIT_SECONDS"),
     DEFAULT_CONVERSION_WAIT_SECONDS,
 )
@@ -178,9 +178,9 @@ def is_rate_limited(client_id: str) -> bool:
 def acquire_conversion_slot() -> bool:
     if CONVERSION_SEMAPHORE is None:
         return True
-    if CONVERSION_WAIT_SECONDS <= 0:
+    if MAX_CONVERSION_WAIT_SECONDS <= 0:
         return CONVERSION_SEMAPHORE.acquire(blocking=False)
-    return CONVERSION_SEMAPHORE.acquire(timeout=CONVERSION_WAIT_SECONDS)
+    return CONVERSION_SEMAPHORE.acquire(timeout=MAX_CONVERSION_WAIT_SECONDS)
 
 
 def validate_zip_payload(path: Path) -> None:
@@ -190,8 +190,7 @@ def validate_zip_payload(path: Path) -> None:
         with zipfile.ZipFile(path) as archive:
             total_uncompressed = 0
             for info in archive.infolist():
-                file_size = max(info.file_size, 0)
-                total_uncompressed += file_size
+                total_uncompressed += info.file_size
                 if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
                     raise ValueError(
                         "Zip file expands beyond the allowed limit "
@@ -202,6 +201,8 @@ def validate_zip_payload(path: Path) -> None:
 
 
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
+    if target_format not in ALLOWED_FORMATS:
+        raise RuntimeError("Unsupported target format requested.")
     cmd = [
         "soffice",
         "--headless",
@@ -218,6 +219,7 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
             capture_output=True,
             text=True,
             check=False,
+            shell=False,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
