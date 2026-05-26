@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,8 +13,54 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-MAX_TOTAL_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
-MAX_TOTAL_UPLOAD_LABEL = "4 GB"
+DEFAULT_MAX_TOTAL_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
+SIZE_UNITS = {
+    "B": 1,
+    "KB": 1024,
+    "MB": 1024**2,
+    "GB": 1024**3,
+    "TB": 1024**4,
+}
+
+
+def parse_upload_limit(raw_value: str | None, default_value: int) -> int:
+    if not raw_value:
+        return default_value
+    normalized = raw_value.strip().replace("_", "")
+    if not normalized:
+        return default_value
+    match = re.fullmatch(r"(?i)(\d+(?:\.\d+)?)\s*([kmgt]?b)?", normalized)
+    if not match:
+        return default_value
+    amount = float(match.group(1))
+    unit = (match.group(2) or "B").upper()
+    multiplier = SIZE_UNITS.get(unit)
+    if multiplier is None:
+        return default_value
+    total_bytes = int(amount * multiplier)
+    if total_bytes <= 0:
+        return default_value
+    return total_bytes
+
+
+def format_bytes_label(total_bytes: int) -> str:
+    if total_bytes <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(total_bytes)
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+    decimal_places = 0 if value >= 10 or index == 0 else 1
+    return f"{value:.{decimal_places}f} {units[index]}"
+
+
+MAX_TOTAL_UPLOAD_BYTES = parse_upload_limit(
+    os.getenv("MAX_FILE_UPLOAD_SIZE"),
+    DEFAULT_MAX_TOTAL_UPLOAD_BYTES,
+)
+MAX_TOTAL_UPLOAD_LABEL = format_bytes_label(MAX_TOTAL_UPLOAD_BYTES)
 app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_UPLOAD_BYTES
 
 COMMON_FORMATS = [
