@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from uuid import uuid4
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -59,6 +60,12 @@ def parse_non_negative_int(raw_value: str | None, default_value: int) -> int:
     if value < 0:
         return default_value
     return value
+
+
+def parse_bool(raw_value: str | None) -> bool:
+    if not raw_value:
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def format_bytes_label(total_bytes: int) -> str:
@@ -113,6 +120,7 @@ RATE_LIMIT_WINDOW_SECONDS = parse_non_negative_int(
     os.getenv("RATE_LIMIT_WINDOW_SECONDS"),
     DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
 )
+TRUST_PROXY_HEADERS = parse_bool(os.getenv("TRUST_PROXY_HEADERS"))
 
 CONVERSION_SEMAPHORE = (
     threading.BoundedSemaphore(MAX_CONCURRENT_CONVERSIONS)
@@ -138,7 +146,10 @@ COMMON_FORMATS = [
     "jpg",
 ]
 
-ALLOWED_FORMATS = set(COMMON_FORMATS)
+FORMAT_LOOKUP = {fmt: fmt for fmt in COMMON_FORMATS}
+ALLOWED_FORMATS = set(FORMAT_LOOKUP)
+ALLOWED_FORMATS_LABEL = ", ".join(sorted(ALLOWED_FORMATS))
+ALLOWED_INPUT_SUFFIXES = {f".{fmt}" for fmt in COMMON_FORMATS}
 UPLOAD_STEM = "upload"
 
 
@@ -148,15 +159,19 @@ def normalize_target_format(raw_value: str) -> str:
         normalized = normalized[1:]
     if not normalized:
         raise ValueError("Please choose an output format.")
-    if normalized not in ALLOWED_FORMATS:
+    safe_format = FORMAT_LOOKUP.get(normalized)
+    if not safe_format:
         raise ValueError("Please choose one of the formats from the dropdown.")
-    return normalized
+    return safe_format
 
 
 def get_client_identifier() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            candidate = forwarded.split(",")[0].strip()
+            if candidate:
+                return candidate
     return request.remote_addr or "unknown"
 
 
@@ -202,7 +217,9 @@ def validate_zip_payload(path: Path) -> None:
 
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
     if target_format not in ALLOWED_FORMATS:
-        raise RuntimeError("Unsupported target format requested.")
+        raise RuntimeError(
+            f"Unsupported target format requested: {target_format}. Allowed: {ALLOWED_FORMATS_LABEL}."
+        )
     cmd = [
         "soffice",
         "--headless",
@@ -292,6 +309,7 @@ def convert():
     except ValueError as error:
         return render_index(error=str(error), selected_format=selected_format), 400
 
+    slot_acquired = False
     client_id = get_client_identifier()
     if is_rate_limited(client_id):
         return render_index(
@@ -313,12 +331,16 @@ def convert():
     try:
         for index, upload in enumerate(uploads, start=1):
             raw_filename = upload.filename or ""
-            filename = secure_filename(raw_filename)
-            if not filename:
-                filename = f"{UPLOAD_STEM}-{index}.bin"
-            filename = unique_filename(filename, used_input_names)
+            download_name = secure_filename(raw_filename)
+            if not download_name:
+                download_name = f"{UPLOAD_STEM}-{index}.bin"
+            download_name = unique_filename(download_name, used_input_names)
+            safe_suffix = Path(download_name).suffix.lower()
+            if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
+                safe_suffix = ".bin"
+            input_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
 
-            input_path = working_dir / filename
+            input_path = working_dir / input_filename
             output_dir = working_dir / f"output-{index}"
             output_dir.mkdir(parents=True, exist_ok=True)
             upload.save(input_path)
@@ -335,8 +357,8 @@ def convert():
                 shutil.rmtree(working_dir, ignore_errors=True)
                 return render_index(error=str(error), selected_format=target_format), 500
 
-            download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
-            converted_outputs.append((converted_path, download_name))
+            download_filename = f"{Path(download_name).stem}{converted_path.suffix or ''}"
+            converted_outputs.append((converted_path, download_filename))
     finally:
         if slot_acquired and CONVERSION_SEMAPHORE is not None:
             CONVERSION_SEMAPHORE.release()

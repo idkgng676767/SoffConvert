@@ -66,6 +66,8 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 - `RATE_LIMIT_REQUESTS`: requests allowed per IP within the rate-limit window (default `30`).
 - `RATE_LIMIT_WINDOW_SECONDS`: rate-limit window duration in seconds (default `60`). Set either value
   to `0` to disable rate limiting.
+- `TRUST_PROXY_HEADERS`: when set to `true`, use the `X-Forwarded-For` header for rate limiting.
+  Only enable this if your reverse proxy overwrites the header with trusted values.
 
 ## Usage
 
@@ -93,6 +95,8 @@ The app returns clear form errors for:
 
 - Uploaded files are written to a temporary directory and cleaned up after response completion.
 - Filenames are sanitized before saving.
+- Uploads are stored with randomized filenames; only recognized extensions are preserved to reduce
+  argument-injection risk when invoking LibreOffice.
 - Zip uploads are inspected for total uncompressed size before processing to prevent decompression bombs.
 - Rate limiting and conversion concurrency limits are enforced in-process; use a reverse proxy for
   shared limits across multiple workers.
