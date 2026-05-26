@@ -107,7 +107,7 @@ def index():
 def convert():
     uploads = []
     for upload in request.files.getlist("file"):
-        if upload is not None and upload.filename.strip():
+        if upload is not None and upload.filename and upload.filename.strip():
             uploads.append(upload)
     selected_format = request.form.get("target_format", "")
     if not uploads:
@@ -123,7 +123,8 @@ def convert():
     converted_outputs: list[tuple[Path, str]] = []
 
     for index, upload in enumerate(uploads, start=1):
-        filename = secure_filename(upload.filename)
+        raw_filename = upload.filename or ""
+        filename = secure_filename(raw_filename)
         if not filename:
             filename = f"{UPLOAD_STEM}-{index}.bin"
         filename = unique_filename(filename, used_input_names)
