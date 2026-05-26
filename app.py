@@ -129,6 +129,9 @@ CONVERSION_SEMAPHORE = (
 )
 RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
 RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = max(RATE_LIMIT_WINDOW_SECONDS, 1)
+RATE_LIMIT_LAST_CLEANUP = 0.0
+SOFFICE_TIMEOUT = SOFFICE_TIMEOUT_SECONDS if SOFFICE_TIMEOUT_SECONDS > 0 else None
 
 COMMON_FORMATS = [
     "pdf",
@@ -147,7 +150,6 @@ COMMON_FORMATS = [
 ]
 
 FORMAT_LOOKUP = {fmt: fmt for fmt in COMMON_FORMATS}
-ALLOWED_FORMATS = set(FORMAT_LOOKUP)
 ALLOWED_INPUT_SUFFIXES = {f".{fmt}" for fmt in COMMON_FORMATS}
 UPLOAD_STEM = "upload"
 
@@ -179,14 +181,26 @@ def is_rate_limited(client_id: str) -> bool:
         return False
     now = time.monotonic()
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    limited = False
     with RATE_LIMIT_LOCK:
         bucket = RATE_LIMIT_BUCKETS[client_id]
         while bucket and bucket[0] < window_start:
             bucket.popleft()
         if len(bucket) >= RATE_LIMIT_REQUESTS:
-            return True
-        bucket.append(now)
-    return False
+            limited = True
+        else:
+            bucket.append(now)
+        if not bucket:
+            RATE_LIMIT_BUCKETS.pop(client_id, None)
+        global RATE_LIMIT_LAST_CLEANUP
+        if now - RATE_LIMIT_LAST_CLEANUP >= RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+            for bucket_key, entries in list(RATE_LIMIT_BUCKETS.items()):
+                while entries and entries[0] < window_start:
+                    entries.popleft()
+                if not entries:
+                    RATE_LIMIT_BUCKETS.pop(bucket_key, None)
+            RATE_LIMIT_LAST_CLEANUP = now
+    return limited
 
 
 def acquire_conversion_slot() -> bool:
@@ -197,8 +211,11 @@ def acquire_conversion_slot() -> bool:
     return CONVERSION_SEMAPHORE.acquire(timeout=MAX_CONVERSION_WAIT_SECONDS)
 
 
-def validate_zip_payload(path: Path) -> None:
-    if not zipfile.is_zipfile(path):
+def validate_zip_payload(path: Path, expect_zip: bool = False) -> None:
+    is_zip = zipfile.is_zipfile(path)
+    if not is_zip:
+        if expect_zip:
+            raise ValueError("Zip file is invalid or corrupted.")
         return
     try:
         with zipfile.ZipFile(path) as archive:
@@ -224,7 +241,6 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
         str(output_dir),
         str(input_file),
     ]
-    timeout = SOFFICE_TIMEOUT_SECONDS if SOFFICE_TIMEOUT_SECONDS > 0 else None
     try:
         completed = subprocess.run(
             cmd,
@@ -232,7 +248,7 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
             text=True,
             check=False,
             shell=False,
-            timeout=timeout,
+            timeout=SOFFICE_TIMEOUT,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(
@@ -272,7 +288,7 @@ def unique_filename(filename: str, used_names: set[str]) -> str:
 
 def render_index(error: str | None = None, selected_format: str = ""):
     normalized_selected = selected_format.strip().lower().lstrip(".")
-    if normalized_selected not in ALLOWED_FORMATS:
+    if normalized_selected not in FORMAT_LOOKUP:
         normalized_selected = ""
     return render_template(
         "index.html",
@@ -330,7 +346,8 @@ def convert():
             if not safe_upload_name:
                 safe_upload_name = f"{UPLOAD_STEM}-{index}.bin"
             safe_upload_name = unique_filename(safe_upload_name, used_input_names)
-            safe_suffix = Path(safe_upload_name).suffix.lower()
+            original_suffix = Path(safe_upload_name).suffix.lower()
+            safe_suffix = original_suffix
             if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
                 safe_suffix = ".bin"
             input_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
@@ -341,7 +358,7 @@ def convert():
             upload.save(input_path)
 
             try:
-                validate_zip_payload(input_path)
+                validate_zip_payload(input_path, expect_zip=original_suffix == ".zip")
             except ValueError as error:
                 shutil.rmtree(working_dir, ignore_errors=True)
                 return render_index(error=str(error), selected_format=target_format), 400
