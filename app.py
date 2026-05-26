@@ -107,7 +107,7 @@ def index():
 def convert():
     uploads = []
     for upload in request.files.getlist("file"):
-        if upload is not None and upload.filename and upload.filename.strip():
+        if upload is not None and upload.filename is not None and upload.filename.strip():
             uploads.append(upload)
     selected_format = request.form.get("target_format", "")
     if not uploads:
