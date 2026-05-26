@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 
 from flask import Flask, render_template, request, send_file
@@ -67,6 +68,23 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
     return converted_files[0]
 
 
+def unique_filename(filename: str, used_names: set[str]) -> str:
+    if filename not in used_names:
+        used_names.add(filename)
+        return filename
+
+    path = Path(filename)
+    stem = path.stem or "upload"
+    suffix = path.suffix
+    counter = 2
+    while True:
+        candidate = f"{stem}-{counter}{suffix}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        counter += 1
+
+
 def render_index(error: str | None = None, selected_format: str = ""):
     normalized_selected = selected_format.strip().lower().lstrip(".")
     if normalized_selected not in ALLOWED_FORMATS:
@@ -86,38 +104,62 @@ def index():
 
 @app.post("/convert")
 def convert():
-    upload = request.files.get("file")
+    uploads = [upload for upload in request.files.getlist("file") if upload and upload.filename.strip()]
     selected_format = request.form.get("target_format", "")
-    if upload is None or upload.filename.strip() == "":
-        return render_index(error="Please choose a file to convert.", selected_format=selected_format), 400
+    if not uploads:
+        return render_index(error="Please choose at least one file to convert.", selected_format=selected_format), 400
 
     try:
         target_format = normalize_target_format(selected_format)
     except ValueError as error:
         return render_index(error=str(error), selected_format=selected_format), 400
 
-    filename = secure_filename(upload.filename)
-    if not filename:
-        filename = "upload.bin"
-
     working_dir = Path(tempfile.mkdtemp(prefix="soffice-convert-"))
-    input_path = working_dir / filename
-    output_dir = working_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    upload.save(input_path)
+    used_input_names: set[str] = set()
+    converted_outputs: list[tuple[Path, str]] = []
 
-    try:
-        converted_path = convert_with_soffice(input_path, output_dir, target_format)
-    except RuntimeError as error:
-        shutil.rmtree(working_dir, ignore_errors=True)
-        return render_index(error=str(error), selected_format=target_format), 500
+    for index, upload in enumerate(uploads, start=1):
+        filename = secure_filename(upload.filename)
+        if not filename:
+            filename = f"upload-{index}.bin"
+        filename = unique_filename(filename, used_input_names)
 
-    download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
+        input_path = working_dir / filename
+        output_dir = working_dir / f"output-{index}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        upload.save(input_path)
+
+        try:
+            converted_path = convert_with_soffice(input_path, output_dir, target_format)
+        except RuntimeError as error:
+            shutil.rmtree(working_dir, ignore_errors=True)
+            return render_index(error=str(error), selected_format=target_format), 500
+
+        download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
+        converted_outputs.append((converted_path, download_name))
+
+    if len(converted_outputs) == 1:
+        converted_path, download_name = converted_outputs[0]
+        response = send_file(
+            converted_path,
+            as_attachment=True,
+            download_name=download_name,
+            mimetype="application/octet-stream",
+        )
+        response.call_on_close(lambda: shutil.rmtree(working_dir, ignore_errors=True))
+        return response
+
+    archive_path = working_dir / "converted-files.zip"
+    used_archive_names: set[str] = set()
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for converted_path, download_name in converted_outputs:
+            archive.write(converted_path, arcname=unique_filename(download_name, used_archive_names))
+
     response = send_file(
-        converted_path,
+        archive_path,
         as_attachment=True,
-        download_name=download_name,
-        mimetype="application/octet-stream",
+        download_name="converted-files.zip",
+        mimetype="application/zip",
     )
     response.call_on_close(lambda: shutil.rmtree(working_dir, ignore_errors=True))
     return response
