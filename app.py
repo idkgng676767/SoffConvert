@@ -29,6 +29,7 @@ COMMON_FORMATS = [
 ]
 
 ALLOWED_FORMATS = set(COMMON_FORMATS)
+UPLOAD_STEM = "upload"
 
 
 def normalize_target_format(raw_value: str) -> str:
@@ -74,7 +75,7 @@ def unique_filename(filename: str, used_names: set[str]) -> str:
         return filename
 
     path = Path(filename)
-    stem = path.stem or "upload"
+    stem = path.stem or UPLOAD_STEM
     suffix = path.suffix
     counter = 2
     while True:
@@ -104,7 +105,10 @@ def index():
 
 @app.post("/convert")
 def convert():
-    uploads = [upload for upload in request.files.getlist("file") if upload and upload.filename.strip()]
+    uploads = []
+    for upload in request.files.getlist("file"):
+        if upload is not None and upload.filename.strip():
+            uploads.append(upload)
     selected_format = request.form.get("target_format", "")
     if not uploads:
         return render_index(error="Please choose at least one file to convert.", selected_format=selected_format), 400
@@ -121,7 +125,7 @@ def convert():
     for index, upload in enumerate(uploads, start=1):
         filename = secure_filename(upload.filename)
         if not filename:
-            filename = f"upload-{index}.bin"
+            filename = f"{UPLOAD_STEM}-{index}.bin"
         filename = unique_filename(filename, used_input_names)
 
         input_path = working_dir / filename
