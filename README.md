@@ -10,7 +10,7 @@ Upload a document, choose an output format, and download the converted result fr
 - Supports common output formats (PDF, DOCX, ODT, RTF, TXT, HTML, XLSX, ODS, CSV, PPTX, ODP, PNG, JPG)
 - Uses a dropdown menu for output format selection
 - Validates output format against supported dropdown values
-- Upload size limit set to 200 MB
+- Upload size limit set to 4 GB total
 
 ## Project Structure
 
@@ -54,7 +54,7 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 
 ## Usage
 
-1. Select one or more files to upload.
+1. Select one or more files to upload (the upload meter shows total usage).
 2. Choose a target output format from the dropdown menu.
 3. Click **Convert files**.
 4. Download the converted file, or a zip when multiple files are uploaded.
