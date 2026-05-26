@@ -21,7 +21,7 @@
         <p class="chip">Paste-free local conversion</p>
         <h1>Convert documents without <em>the headache.</em></h1>
         <p class="sub">
-          Upload a file, choose your target format, and download the converted result.
+          Upload one or more files, choose your target format, and download the converted result.
         </p>
 
         {% if error %}
@@ -29,8 +29,8 @@
         {% endif %}
 
         <form action="{{ url_for('convert') }}" method="post" enctype="multipart/form-data" class="form-grid">
-          <label for="file">File</label>
-          <input id="file" name="file" type="file" required />
+          <label for="file">Files</label>
+          <input id="file" name="file" type="file" required multiple />
 
           <label for="target_format">Output format</label>
           <div class="select-wrap">
@@ -42,11 +42,11 @@
             </select>
           </div>
 
-          <button type="submit">Convert file</button>
+          <button type="submit">Convert files</button>
         </form>
 
         <p class="hint">
-          Pick the file type you want from the dropdown, then convert.
+          Pick the file type you want from the dropdown. Multiple files download as a zip.
         </p>
       </section>
     </main>

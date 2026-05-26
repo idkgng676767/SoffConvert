@@ -6,7 +6,7 @@ Upload a document, choose an output format, and download the converted result fr
 ## Key Features
 
 - Local conversion using your own LibreOffice installation
-- Web interface for quick one-file-at-a-time conversion
+- Web interface for quick single or batch conversion
 - Supports common output formats (PDF, DOCX, ODT, RTF, TXT, HTML, XLSX, ODS, CSV, PPTX, ODP, PNG, JPG)
 - Uses a dropdown menu for output format selection
 - Validates output format against supported dropdown values
@@ -54,10 +54,10 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 
 ## Usage
 
-1. Select a file to upload.
+1. Select one or more files to upload.
 2. Choose a target output format from the dropdown menu.
-3. Click **Convert file**.
-4. Download the converted file returned by the app.
+3. Click **Convert files**.
+4. Download the converted file, or a zip when multiple files are uploaded.
 
 ### Output format notes
 
