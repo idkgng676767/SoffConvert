@@ -156,7 +156,7 @@ def convert():
 
     archive_path = working_dir / "converted-files.zip"
     used_archive_names: set[str] = set()
-    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
         for converted_path, download_name in converted_outputs:
             archive.write(converted_path, arcname=unique_filename(download_name, used_archive_names))
 
