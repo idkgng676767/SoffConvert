@@ -104,13 +104,15 @@
           totalBytes += file.size || 0;
         }
         const percent = maxBytes ? Math.min((totalBytes / maxBytes) * 100, 100) : 0;
+        const usageText = `${formatBytes(totalBytes)} of ${formatBytes(maxBytes)}`;
         uploadRange.value = percent.toFixed(1);
         uploadRange.setAttribute("aria-valuenow", percent.toFixed(1));
-        uploadRange.setAttribute("aria-valuetext", `${formatBytes(totalBytes)} of ${formatBytes(maxBytes)}`);
+        uploadRange.setAttribute("aria-valuetext", usageText);
+        uploadRange.setAttribute("aria-label", `Upload usage: ${usageText}`);
         uploadRange.style.setProperty("--range-percent", `${percent}%`);
         uploadRange.style.setProperty("--range-color", totalBytes > maxBytes ? "var(--red)" : "var(--toffee)");
         uploadMeter.classList.toggle("is-over", totalBytes > maxBytes);
-        uploadUsage.textContent = `${formatBytes(totalBytes)} of ${formatBytes(maxBytes)}`;
+        uploadUsage.textContent = usageText;
       };
 
       uploadInput?.addEventListener("change", updateUploadMeter);
