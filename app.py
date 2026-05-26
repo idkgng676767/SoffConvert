@@ -5,7 +5,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import zipfile
+from collections import defaultdict, deque
 from pathlib import Path
 
 from flask import Flask, render_template, request, send_file
@@ -43,6 +46,21 @@ def parse_upload_limit(raw_value: str | None, default_value: int) -> int:
     return total_bytes
 
 
+def parse_non_negative_int(raw_value: str | None, default_value: int) -> int:
+    if raw_value is None:
+        return default_value
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return default_value
+    try:
+        value = int(normalized)
+    except ValueError:
+        return default_value
+    if value < 0:
+        return default_value
+    return value
+
+
 def format_bytes_label(total_bytes: int) -> str:
     if total_bytes <= 0:
         return "0 B"
@@ -62,6 +80,47 @@ MAX_TOTAL_UPLOAD_BYTES = parse_upload_limit(
 )
 MAX_TOTAL_UPLOAD_LABEL = format_bytes_label(MAX_TOTAL_UPLOAD_BYTES)
 app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_UPLOAD_BYTES
+
+MAX_ZIP_UNCOMPRESSED_BYTES = parse_upload_limit(
+    os.getenv("MAX_ZIP_UNCOMPRESSED_SIZE"),
+    MAX_TOTAL_UPLOAD_BYTES,
+)
+MAX_ZIP_UNCOMPRESSED_LABEL = format_bytes_label(MAX_ZIP_UNCOMPRESSED_BYTES)
+
+DEFAULT_MAX_CONCURRENT_CONVERSIONS = 2
+DEFAULT_CONVERSION_WAIT_SECONDS = 30
+DEFAULT_SOFFICE_TIMEOUT_SECONDS = 300
+DEFAULT_RATE_LIMIT_REQUESTS = 30
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
+
+MAX_CONCURRENT_CONVERSIONS = parse_non_negative_int(
+    os.getenv("MAX_CONCURRENT_CONVERSIONS"),
+    DEFAULT_MAX_CONCURRENT_CONVERSIONS,
+)
+CONVERSION_WAIT_SECONDS = parse_non_negative_int(
+    os.getenv("MAX_CONVERSION_WAIT_SECONDS"),
+    DEFAULT_CONVERSION_WAIT_SECONDS,
+)
+SOFFICE_TIMEOUT_SECONDS = parse_non_negative_int(
+    os.getenv("SOFFICE_TIMEOUT_SECONDS"),
+    DEFAULT_SOFFICE_TIMEOUT_SECONDS,
+)
+RATE_LIMIT_REQUESTS = parse_non_negative_int(
+    os.getenv("RATE_LIMIT_REQUESTS"),
+    DEFAULT_RATE_LIMIT_REQUESTS,
+)
+RATE_LIMIT_WINDOW_SECONDS = parse_non_negative_int(
+    os.getenv("RATE_LIMIT_WINDOW_SECONDS"),
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+)
+
+CONVERSION_SEMAPHORE = (
+    threading.BoundedSemaphore(MAX_CONCURRENT_CONVERSIONS)
+    if MAX_CONCURRENT_CONVERSIONS > 0
+    else None
+)
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+RATE_LIMIT_LOCK = threading.Lock()
 
 COMMON_FORMATS = [
     "pdf",
@@ -94,6 +153,54 @@ def normalize_target_format(raw_value: str) -> str:
     return normalized
 
 
+def get_client_identifier() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def is_rate_limited(client_id: str) -> bool:
+    if RATE_LIMIT_REQUESTS <= 0 or RATE_LIMIT_WINDOW_SECONDS <= 0:
+        return False
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    with RATE_LIMIT_LOCK:
+        bucket = RATE_LIMIT_BUCKETS[client_id]
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= RATE_LIMIT_REQUESTS:
+            return True
+        bucket.append(now)
+    return False
+
+
+def acquire_conversion_slot() -> bool:
+    if CONVERSION_SEMAPHORE is None:
+        return True
+    if CONVERSION_WAIT_SECONDS <= 0:
+        return CONVERSION_SEMAPHORE.acquire(blocking=False)
+    return CONVERSION_SEMAPHORE.acquire(timeout=CONVERSION_WAIT_SECONDS)
+
+
+def validate_zip_payload(path: Path) -> None:
+    if not zipfile.is_zipfile(path):
+        return
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total_uncompressed = 0
+            for info in archive.infolist():
+                file_size = max(info.file_size, 0)
+                total_uncompressed += file_size
+                if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        "Zip file expands beyond the allowed limit "
+                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
+                    )
+    except zipfile.BadZipFile as error:
+        raise ValueError("Zip file is invalid or corrupted.") from error
+
+
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
     cmd = [
         "soffice",
@@ -104,7 +211,19 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
         str(output_dir),
         str(input_file),
     ]
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    timeout = SOFFICE_TIMEOUT_SECONDS if SOFFICE_TIMEOUT_SECONDS > 0 else None
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Conversion timed out after {SOFFICE_TIMEOUT_SECONDS} seconds."
+        ) from error
 
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "Unknown soffice error."
@@ -171,30 +290,54 @@ def convert():
     except ValueError as error:
         return render_index(error=str(error), selected_format=selected_format), 400
 
+    client_id = get_client_identifier()
+    if is_rate_limited(client_id):
+        return render_index(
+            error="Too many requests. Please wait a moment and try again.",
+            selected_format=target_format,
+        ), 429
+
+    slot_acquired = acquire_conversion_slot()
+    if not slot_acquired:
+        return render_index(
+            error="Too many conversions in progress. Please try again shortly.",
+            selected_format=target_format,
+        ), 429
+
     working_dir = Path(tempfile.mkdtemp(prefix="soffice-convert-"))
     used_input_names: set[str] = set()
     converted_outputs: list[tuple[Path, str]] = []
 
-    for index, upload in enumerate(uploads, start=1):
-        raw_filename = upload.filename or ""
-        filename = secure_filename(raw_filename)
-        if not filename:
-            filename = f"{UPLOAD_STEM}-{index}.bin"
-        filename = unique_filename(filename, used_input_names)
+    try:
+        for index, upload in enumerate(uploads, start=1):
+            raw_filename = upload.filename or ""
+            filename = secure_filename(raw_filename)
+            if not filename:
+                filename = f"{UPLOAD_STEM}-{index}.bin"
+            filename = unique_filename(filename, used_input_names)
 
-        input_path = working_dir / filename
-        output_dir = working_dir / f"output-{index}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        upload.save(input_path)
+            input_path = working_dir / filename
+            output_dir = working_dir / f"output-{index}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            upload.save(input_path)
 
-        try:
-            converted_path = convert_with_soffice(input_path, output_dir, target_format)
-        except RuntimeError as error:
-            shutil.rmtree(working_dir, ignore_errors=True)
-            return render_index(error=str(error), selected_format=target_format), 500
+            try:
+                validate_zip_payload(input_path)
+            except ValueError as error:
+                shutil.rmtree(working_dir, ignore_errors=True)
+                return render_index(error=str(error), selected_format=target_format), 400
 
-        download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
-        converted_outputs.append((converted_path, download_name))
+            try:
+                converted_path = convert_with_soffice(input_path, output_dir, target_format)
+            except RuntimeError as error:
+                shutil.rmtree(working_dir, ignore_errors=True)
+                return render_index(error=str(error), selected_format=target_format), 500
+
+            download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
+            converted_outputs.append((converted_path, download_name))
+    finally:
+        if slot_acquired and CONVERSION_SEMAPHORE is not None:
+            CONVERSION_SEMAPHORE.release()
 
     if len(converted_outputs) == 1:
         converted_path, download_name = converted_outputs[0]

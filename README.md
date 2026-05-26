@@ -56,6 +56,16 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 
 - `MAX_FILE_UPLOAD_SIZE`: total upload limit for all uploaded files. Accepts bytes or a unit suffix
   (`KB`, `MB`, `GB`, `TB`). Example: `MAX_FILE_UPLOAD_SIZE=512MB`.
+- `MAX_ZIP_UNCOMPRESSED_SIZE`: total uncompressed byte limit for uploaded zip files. Defaults to
+  `MAX_FILE_UPLOAD_SIZE`.
+- `MAX_CONCURRENT_CONVERSIONS`: maximum conversions processed at once per app process (default `2`).
+  Set to `0` to disable the in-process limit.
+- `MAX_CONVERSION_WAIT_SECONDS`: how long to wait for a conversion slot before failing (default `30`).
+  Set to `0` to fail fast.
+- `SOFFICE_TIMEOUT_SECONDS`: timeout for LibreOffice conversions (default `300`). Set to `0` to disable.
+- `RATE_LIMIT_REQUESTS`: requests allowed per IP within the rate-limit window (default `30`).
+- `RATE_LIMIT_WINDOW_SECONDS`: rate-limit window duration in seconds (default `60`). Set either value
+  to `0` to disable rate limiting.
 
 ## Usage
 
@@ -83,6 +93,9 @@ The app returns clear form errors for:
 
 - Uploaded files are written to a temporary directory and cleaned up after response completion.
 - Filenames are sanitized before saving.
+- Zip uploads are inspected for total uncompressed size before processing to prevent decompression bombs.
+- Rate limiting and conversion concurrency limits are enforced in-process; use a reverse proxy for
+  shared limits across multiple workers.
 - This app is intended for local/trusted use; add authentication and stricter controls before internet exposure.
 
 ## License
