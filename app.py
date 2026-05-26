@@ -5,7 +5,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import zipfile
+from uuid import uuid4
+from collections import deque
 from pathlib import Path
 
 from flask import Flask, render_template, request, send_file
@@ -43,6 +47,30 @@ def parse_upload_limit(raw_value: str | None, default_value: int) -> int:
     return total_bytes
 
 
+def parse_nonnegative_int(raw_value: str | None, default_value: int) -> int:
+    if raw_value is None:
+        return default_value
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return default_value
+    try:
+        value = int(normalized)
+    except ValueError:
+        return default_value
+    if value < 0:
+        return default_value
+    return value
+
+
+def parse_bool(raw_value: str | None) -> bool:
+    if not raw_value:
+        return False
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {"1", "true", "yes", "on"}
+
+
 def format_bytes_label(total_bytes: int) -> str:
     if total_bytes <= 0:
         return "0 B"
@@ -63,6 +91,51 @@ MAX_TOTAL_UPLOAD_BYTES = parse_upload_limit(
 MAX_TOTAL_UPLOAD_LABEL = format_bytes_label(MAX_TOTAL_UPLOAD_BYTES)
 app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_UPLOAD_BYTES
 
+MAX_ZIP_UNCOMPRESSED_BYTES = parse_upload_limit(
+    os.getenv("MAX_ZIP_UNCOMPRESSED_SIZE"),
+    MAX_TOTAL_UPLOAD_BYTES,
+)
+MAX_ZIP_UNCOMPRESSED_LABEL = format_bytes_label(MAX_ZIP_UNCOMPRESSED_BYTES)
+
+DEFAULT_MAX_CONCURRENT_CONVERSIONS = 2
+DEFAULT_CONVERSION_WAIT_SECONDS = 30
+DEFAULT_SOFFICE_TIMEOUT_SECONDS = 300
+DEFAULT_RATE_LIMIT_REQUESTS = 30
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
+
+MAX_CONCURRENT_CONVERSIONS = parse_nonnegative_int(
+    os.getenv("MAX_CONCURRENT_CONVERSIONS"),
+    DEFAULT_MAX_CONCURRENT_CONVERSIONS,
+)
+MAX_CONVERSION_WAIT_SECONDS = parse_nonnegative_int(
+    os.getenv("MAX_CONVERSION_WAIT_SECONDS"),
+    DEFAULT_CONVERSION_WAIT_SECONDS,
+)
+SOFFICE_TIMEOUT_SECONDS = parse_nonnegative_int(
+    os.getenv("SOFFICE_TIMEOUT_SECONDS"),
+    DEFAULT_SOFFICE_TIMEOUT_SECONDS,
+)
+RATE_LIMIT_REQUESTS = parse_nonnegative_int(
+    os.getenv("RATE_LIMIT_REQUESTS"),
+    DEFAULT_RATE_LIMIT_REQUESTS,
+)
+RATE_LIMIT_WINDOW_SECONDS = parse_nonnegative_int(
+    os.getenv("RATE_LIMIT_WINDOW_SECONDS"),
+    DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+)
+TRUST_PROXY_HEADERS = parse_bool(os.getenv("TRUST_PROXY_HEADERS"))
+
+CONVERSION_SEMAPHORE = (
+    threading.BoundedSemaphore(MAX_CONCURRENT_CONVERSIONS)
+    if MAX_CONCURRENT_CONVERSIONS > 0
+    else None
+)
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
+RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = max(RATE_LIMIT_WINDOW_SECONDS, 1)
+RATE_LIMIT_LAST_CLEANUP = 0.0
+SOFFICE_TIMEOUT = SOFFICE_TIMEOUT_SECONDS if SOFFICE_TIMEOUT_SECONDS > 0 else None
+
 COMMON_FORMATS = [
     "pdf",
     "docx",
@@ -79,7 +152,8 @@ COMMON_FORMATS = [
     "jpg",
 ]
 
-ALLOWED_FORMATS = set(COMMON_FORMATS)
+FORMAT_LOOKUP = {fmt: fmt for fmt in COMMON_FORMATS}
+ALLOWED_INPUT_SUFFIXES = {f".{fmt}" for fmt in COMMON_FORMATS}
 UPLOAD_STEM = "upload"
 
 
@@ -89,9 +163,83 @@ def normalize_target_format(raw_value: str) -> str:
         normalized = normalized[1:]
     if not normalized:
         raise ValueError("Please choose an output format.")
-    if normalized not in ALLOWED_FORMATS:
+    safe_format = FORMAT_LOOKUP.get(normalized)
+    if not safe_format:
         raise ValueError("Please choose one of the formats from the dropdown.")
-    return normalized
+    return safe_format
+
+
+def get_client_ip() -> str:
+    if TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            candidate = forwarded.split(",")[0].strip()
+            if candidate:
+                return candidate
+    return request.remote_addr or "unknown"
+
+
+def is_rate_limited(client_id: str) -> bool:
+    global RATE_LIMIT_LAST_CLEANUP
+    if RATE_LIMIT_REQUESTS <= 0 or RATE_LIMIT_WINDOW_SECONDS <= 0:
+        return False
+    now = time.monotonic()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    limited = False
+    with RATE_LIMIT_LOCK:
+        bucket = RATE_LIMIT_BUCKETS.get(client_id)
+        if bucket is None:
+            bucket = deque()
+            RATE_LIMIT_BUCKETS[client_id] = bucket
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+        if len(bucket) >= RATE_LIMIT_REQUESTS:
+            limited = True
+        else:
+            bucket.append(now)
+        if not bucket:
+            RATE_LIMIT_BUCKETS.pop(client_id, None)
+        if now - RATE_LIMIT_LAST_CLEANUP >= RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
+            for bucket_key, entries in list(RATE_LIMIT_BUCKETS.items()):
+                while entries and entries[0] < window_start:
+                    entries.popleft()
+                if not entries:
+                    RATE_LIMIT_BUCKETS.pop(bucket_key, None)
+            RATE_LIMIT_LAST_CLEANUP = now
+    return limited
+
+
+def acquire_conversion_slot() -> bool:
+    if CONVERSION_SEMAPHORE is None:
+        return True
+    if MAX_CONVERSION_WAIT_SECONDS <= 0:
+        return CONVERSION_SEMAPHORE.acquire(blocking=False)
+    return CONVERSION_SEMAPHORE.acquire(timeout=MAX_CONVERSION_WAIT_SECONDS)
+
+
+def validate_zip_payload(path: Path, require_zip: bool = False) -> None:
+    is_zip = zipfile.is_zipfile(path)
+    if not is_zip:
+        if require_zip:
+            raise ValueError("Zip file is invalid or corrupted.")
+        return
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total_uncompressed = 0
+            for info in archive.infolist():
+                if info.file_size > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        "Zip file expands beyond the allowed limit "
+                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
+                    )
+                if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES - info.file_size:
+                    raise ValueError(
+                        "Zip file expands beyond the allowed limit "
+                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
+                    )
+                total_uncompressed += info.file_size
+    except zipfile.BadZipFile as error:
+        raise ValueError("Zip file is invalid or corrupted.") from error
 
 
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
@@ -104,7 +252,19 @@ def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str)
         str(output_dir),
         str(input_file),
     ]
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+            timeout=SOFFICE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"Conversion timed out after {SOFFICE_TIMEOUT_SECONDS} seconds."
+        ) from error
 
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "Unknown soffice error."
@@ -139,7 +299,7 @@ def unique_filename(filename: str, used_names: set[str]) -> str:
 
 def render_index(error: str | None = None, selected_format: str = ""):
     normalized_selected = selected_format.strip().lower().lstrip(".")
-    if normalized_selected not in ALLOWED_FORMATS:
+    if normalized_selected not in FORMAT_LOOKUP:
         normalized_selected = ""
     return render_template(
         "index.html",
@@ -171,30 +331,60 @@ def convert():
     except ValueError as error:
         return render_index(error=str(error), selected_format=selected_format), 400
 
+    slot_acquired = False
+    client_id = get_client_ip()
+    if is_rate_limited(client_id):
+        return render_index(
+            error="Too many requests. Please wait a moment and try again.",
+            selected_format=target_format,
+        ), 429
+
+    slot_acquired = acquire_conversion_slot()
+    if not slot_acquired:
+        return render_index(
+            error="Too many conversions in progress. Please try again shortly.",
+            selected_format=target_format,
+        ), 429
+
     working_dir = Path(tempfile.mkdtemp(prefix="soffice-convert-"))
-    used_input_names: set[str] = set()
+    used_download_names: set[str] = set()
     converted_outputs: list[tuple[Path, str]] = []
 
-    for index, upload in enumerate(uploads, start=1):
-        raw_filename = upload.filename or ""
-        filename = secure_filename(raw_filename)
-        if not filename:
-            filename = f"{UPLOAD_STEM}-{index}.bin"
-        filename = unique_filename(filename, used_input_names)
+    try:
+        for index, upload in enumerate(uploads, start=1):
+            raw_filename = upload.filename or ""
+            safe_upload_name = secure_filename(raw_filename)
+            if not safe_upload_name:
+                safe_upload_name = f"{UPLOAD_STEM}-{index}.bin"
+            safe_upload_name = unique_filename(safe_upload_name, used_download_names)
+            original_suffix = Path(safe_upload_name).suffix.lower()
+            safe_suffix = original_suffix
+            if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
+                safe_suffix = ".bin"
+            storage_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
 
-        input_path = working_dir / filename
-        output_dir = working_dir / f"output-{index}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        upload.save(input_path)
+            input_path = working_dir / storage_filename
+            output_dir = working_dir / f"output-{index}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            upload.save(input_path)
 
-        try:
-            converted_path = convert_with_soffice(input_path, output_dir, target_format)
-        except RuntimeError as error:
-            shutil.rmtree(working_dir, ignore_errors=True)
-            return render_index(error=str(error), selected_format=target_format), 500
+            try:
+                validate_zip_payload(input_path, require_zip=original_suffix == ".zip")
+            except ValueError as error:
+                shutil.rmtree(working_dir, ignore_errors=True)
+                return render_index(error=str(error), selected_format=target_format), 400
 
-        download_name = f"{Path(filename).stem}{converted_path.suffix or ''}"
-        converted_outputs.append((converted_path, download_name))
+            try:
+                converted_path = convert_with_soffice(input_path, output_dir, target_format)
+            except RuntimeError as error:
+                shutil.rmtree(working_dir, ignore_errors=True)
+                return render_index(error=str(error), selected_format=target_format), 500
+
+            download_name = f"{Path(safe_upload_name).stem}{converted_path.suffix or ''}"
+            converted_outputs.append((converted_path, download_name))
+    finally:
+        if slot_acquired and CONVERSION_SEMAPHORE is not None:
+            CONVERSION_SEMAPHORE.release()
 
     if len(converted_outputs) == 1:
         converted_path, download_name = converted_outputs[0]
