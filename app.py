@@ -9,7 +9,7 @@ import threading
 import time
 import zipfile
 from uuid import uuid4
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
 
 from flask import Flask, render_template, request, send_file
@@ -65,7 +65,10 @@ def parse_nonnegative_int(raw_value: str | None, default_value: int) -> int:
 def parse_bool(raw_value: str | None) -> bool:
     if not raw_value:
         return False
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return False
+    return normalized in {"1", "true", "yes", "on"}
 
 
 def format_bytes_label(total_bytes: int) -> str:
@@ -127,7 +130,7 @@ CONVERSION_SEMAPHORE = (
     if MAX_CONCURRENT_CONVERSIONS > 0
     else None
 )
-RATE_LIMIT_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+RATE_LIMIT_BUCKETS: dict[str, deque[float]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = max(RATE_LIMIT_WINDOW_SECONDS, 1)
 RATE_LIMIT_LAST_CLEANUP = 0.0
@@ -177,13 +180,17 @@ def get_client_ip() -> str:
 
 
 def is_rate_limited(client_id: str) -> bool:
+    global RATE_LIMIT_LAST_CLEANUP
     if RATE_LIMIT_REQUESTS <= 0 or RATE_LIMIT_WINDOW_SECONDS <= 0:
         return False
     now = time.monotonic()
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
     limited = False
     with RATE_LIMIT_LOCK:
-        bucket = RATE_LIMIT_BUCKETS[client_id]
+        bucket = RATE_LIMIT_BUCKETS.get(client_id)
+        if bucket is None:
+            bucket = deque()
+            RATE_LIMIT_BUCKETS[client_id] = bucket
         while bucket and bucket[0] < window_start:
             bucket.popleft()
         if len(bucket) >= RATE_LIMIT_REQUESTS:
@@ -192,7 +199,6 @@ def is_rate_limited(client_id: str) -> bool:
             bucket.append(now)
         if not bucket:
             RATE_LIMIT_BUCKETS.pop(client_id, None)
-        global RATE_LIMIT_LAST_CLEANUP
         if now - RATE_LIMIT_LAST_CLEANUP >= RATE_LIMIT_CLEANUP_INTERVAL_SECONDS:
             for bucket_key, entries in list(RATE_LIMIT_BUCKETS.items()):
                 while entries and entries[0] < window_start:
@@ -211,16 +217,26 @@ def acquire_conversion_slot() -> bool:
     return CONVERSION_SEMAPHORE.acquire(timeout=MAX_CONVERSION_WAIT_SECONDS)
 
 
-def validate_zip_payload(path: Path, expect_zip: bool = False) -> None:
+def validate_zip_payload(path: Path, require_zip: bool = False) -> None:
     is_zip = zipfile.is_zipfile(path)
     if not is_zip:
-        if expect_zip:
+        if require_zip:
             raise ValueError("Zip file is invalid or corrupted.")
         return
     try:
         with zipfile.ZipFile(path) as archive:
             total_uncompressed = 0
             for info in archive.infolist():
+                if info.file_size > MAX_ZIP_UNCOMPRESSED_BYTES:
+                    raise ValueError(
+                        "Zip file expands beyond the allowed limit "
+                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
+                    )
+                if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES - info.file_size:
+                    raise ValueError(
+                        "Zip file expands beyond the allowed limit "
+                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
+                    )
                 total_uncompressed += info.file_size
                 if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
                     raise ValueError(
@@ -336,7 +352,7 @@ def convert():
         ), 429
 
     working_dir = Path(tempfile.mkdtemp(prefix="soffice-convert-"))
-    used_input_names: set[str] = set()
+    used_download_names: set[str] = set()
     converted_outputs: list[tuple[Path, str]] = []
 
     try:
@@ -345,7 +361,7 @@ def convert():
             safe_upload_name = secure_filename(raw_filename)
             if not safe_upload_name:
                 safe_upload_name = f"{UPLOAD_STEM}-{index}.bin"
-            safe_upload_name = unique_filename(safe_upload_name, used_input_names)
+            safe_upload_name = unique_filename(safe_upload_name, used_download_names)
             original_suffix = Path(safe_upload_name).suffix.lower()
             safe_suffix = original_suffix
             if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
@@ -358,7 +374,7 @@ def convert():
             upload.save(input_path)
 
             try:
-                validate_zip_payload(input_path, expect_zip=original_suffix == ".zip")
+                validate_zip_payload(input_path, require_zip=original_suffix == ".zip")
             except ValueError as error:
                 shutil.rmtree(working_dir, ignore_errors=True)
                 return render_index(error=str(error), selected_format=target_format), 400
