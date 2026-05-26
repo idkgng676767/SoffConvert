@@ -42,12 +42,12 @@
               id="upload-range"
               type="range"
               min="0"
-              max="100"
+              max="{{ upload_limit_bytes }}"
               value="0"
-              step="0.1"
+              step="1"
               aria-label="Upload usage meter"
               aria-valuemin="0"
-              aria-valuemax="100"
+              aria-valuemax="{{ upload_limit_bytes }}"
               aria-valuenow="0"
               disabled
             />
@@ -102,7 +102,9 @@
         if (!maxBytes) {
           const usageText = "0 B of 0 B";
           uploadRange.value = "0";
+          uploadRange.max = "0";
           uploadRange.setAttribute("aria-valuenow", "0");
+          uploadRange.setAttribute("aria-valuemax", "0");
           uploadRange.setAttribute("aria-valuetext", usageText);
           uploadRange.setAttribute("aria-label", `Upload usage: ${usageText}`);
           uploadRange.style.setProperty("--range-percent", "0%");
@@ -117,8 +119,10 @@
         }
         const percent = maxBytes ? Math.min((totalBytes / maxBytes) * 100, 100) : 0;
         const usageText = `${formatBytes(totalBytes)} of ${formatBytes(maxBytes)}`;
-        uploadRange.value = percent.toFixed(1);
-        uploadRange.setAttribute("aria-valuenow", percent.toFixed(1));
+        uploadRange.max = String(maxBytes);
+        uploadRange.value = String(Math.min(totalBytes, maxBytes));
+        uploadRange.setAttribute("aria-valuenow", String(Math.min(totalBytes, maxBytes)));
+        uploadRange.setAttribute("aria-valuemax", String(maxBytes));
         uploadRange.setAttribute("aria-valuetext", usageText);
         uploadRange.setAttribute("aria-label", `Upload usage: ${usageText}`);
         uploadRange.style.setProperty("--range-percent", `${percent}%`);

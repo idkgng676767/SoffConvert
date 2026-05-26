@@ -10,7 +10,7 @@ Upload a document, choose an output format, and download the converted result fr
 - Supports common output formats (PDF, DOCX, ODT, RTF, TXT, HTML, XLSX, ODS, CSV, PPTX, ODP, PNG, JPG)
 - Uses a dropdown menu for output format selection
 - Validates output format against supported dropdown values
-- Upload size limit set to 4 GB total
+- Upload size limit defaults to 4 GB total (configurable via `MAX_FILE_UPLOAD_SIZE`)
 
 ## Project Structure
 
@@ -51,6 +51,11 @@ python app.py
 ```
 
 Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
+
+## Configuration
+
+- `MAX_FILE_UPLOAD_SIZE`: total upload limit for all uploaded files. Accepts bytes or a unit suffix
+  (`KB`, `MB`, `GB`, `TB`). Example: `MAX_FILE_UPLOAD_SIZE=512MB`.
 
 ## Usage
 
