@@ -7,10 +7,13 @@ import zipfile
 from pathlib import Path
 
 from flask import Flask, render_template, request, send_file
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+MAX_TOTAL_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
+MAX_TOTAL_UPLOAD_LABEL = "4 GB"
+app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_UPLOAD_BYTES
 
 COMMON_FORMATS = [
     "pdf",
@@ -95,6 +98,8 @@ def render_index(error: str | None = None, selected_format: str = ""):
         common_formats=COMMON_FORMATS,
         error=error,
         selected_format=normalized_selected,
+        upload_limit_bytes=MAX_TOTAL_UPLOAD_BYTES,
+        upload_limit_label=MAX_TOTAL_UPLOAD_LABEL,
     )
 
 
@@ -170,6 +175,13 @@ def convert():
     return response
 
 
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_entity_too_large(_: RequestEntityTooLarge):
+    return (
+        render_index(error=f"Upload too large. Max total upload size is {MAX_TOTAL_UPLOAD_LABEL}."),
+        413,
+    )
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
-    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
