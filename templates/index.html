@@ -99,6 +99,18 @@
         if (!uploadInput || !uploadRange || !uploadUsage || !uploadMeter) {
           return;
         }
+        if (!maxBytes) {
+          const usageText = "0 B of 0 B";
+          uploadRange.value = "0";
+          uploadRange.setAttribute("aria-valuenow", "0");
+          uploadRange.setAttribute("aria-valuetext", usageText);
+          uploadRange.setAttribute("aria-label", `Upload usage: ${usageText}`);
+          uploadRange.style.setProperty("--range-percent", "0%");
+          uploadRange.style.setProperty("--range-color", "var(--toffee)");
+          uploadMeter.classList.remove("is-over");
+          uploadUsage.textContent = usageText;
+          return;
+        }
         let totalBytes = 0;
         for (const file of uploadInput.files) {
           totalBytes += file.size || 0;
