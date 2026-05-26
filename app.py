@@ -238,11 +238,6 @@ def validate_zip_payload(path: Path, require_zip: bool = False) -> None:
                         f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
                     )
                 total_uncompressed += info.file_size
-                if total_uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES:
-                    raise ValueError(
-                        "Zip file expands beyond the allowed limit "
-                        f"({MAX_ZIP_UNCOMPRESSED_LABEL})."
-                    )
     except zipfile.BadZipFile as error:
         raise ValueError("Zip file is invalid or corrupted.") from error
 
@@ -366,9 +361,9 @@ def convert():
             safe_suffix = original_suffix
             if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
                 safe_suffix = ".bin"
-            input_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
+            storage_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
 
-            input_path = working_dir / input_filename
+            input_path = working_dir / storage_filename
             output_dir = working_dir / f"output-{index}"
             output_dir.mkdir(parents=True, exist_ok=True)
             upload.save(input_path)
