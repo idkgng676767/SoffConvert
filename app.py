@@ -148,7 +148,6 @@ COMMON_FORMATS = [
 
 FORMAT_LOOKUP = {fmt: fmt for fmt in COMMON_FORMATS}
 ALLOWED_FORMATS = set(FORMAT_LOOKUP)
-ALLOWED_FORMATS_LABEL = ", ".join(sorted(ALLOWED_FORMATS))
 ALLOWED_INPUT_SUFFIXES = {f".{fmt}" for fmt in COMMON_FORMATS}
 UPLOAD_STEM = "upload"
 
@@ -216,10 +215,6 @@ def validate_zip_payload(path: Path) -> None:
 
 
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
-    if target_format not in ALLOWED_FORMATS:
-        raise RuntimeError(
-            f"Unsupported target format requested: {target_format}. Allowed: {ALLOWED_FORMATS_LABEL}."
-        )
     cmd = [
         "soffice",
         "--headless",
@@ -331,11 +326,11 @@ def convert():
     try:
         for index, upload in enumerate(uploads, start=1):
             raw_filename = upload.filename or ""
-            download_name = secure_filename(raw_filename)
-            if not download_name:
-                download_name = f"{UPLOAD_STEM}-{index}.bin"
-            download_name = unique_filename(download_name, used_input_names)
-            safe_suffix = Path(download_name).suffix.lower()
+            safe_upload_name = secure_filename(raw_filename)
+            if not safe_upload_name:
+                safe_upload_name = f"{UPLOAD_STEM}-{index}.bin"
+            safe_upload_name = unique_filename(safe_upload_name, used_input_names)
+            safe_suffix = Path(safe_upload_name).suffix.lower()
             if safe_suffix not in ALLOWED_INPUT_SUFFIXES:
                 safe_suffix = ".bin"
             input_filename = f"{UPLOAD_STEM}-{uuid4().hex}{safe_suffix}"
@@ -357,8 +352,8 @@ def convert():
                 shutil.rmtree(working_dir, ignore_errors=True)
                 return render_index(error=str(error), selected_format=target_format), 500
 
-            download_filename = f"{Path(download_name).stem}{converted_path.suffix or ''}"
-            converted_outputs.append((converted_path, download_filename))
+            download_name = f"{Path(safe_upload_name).stem}{converted_path.suffix or ''}"
+            converted_outputs.append((converted_path, download_name))
     finally:
         if slot_acquired and CONVERSION_SEMAPHORE is not None:
             CONVERSION_SEMAPHORE.release()
