@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import re
 import shutil
@@ -7,6 +11,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from uuid import uuid4
 from collections import deque
@@ -100,6 +107,9 @@ MAX_ZIP_UNCOMPRESSED_LABEL = format_bytes_label(MAX_ZIP_UNCOMPRESSED_BYTES)
 DEFAULT_MAX_CONCURRENT_CONVERSIONS = 2
 DEFAULT_CONVERSION_WAIT_SECONDS = 30
 DEFAULT_SOFFICE_TIMEOUT_SECONDS = 300
+DEFAULT_ONLYOFFICE_TIMEOUT_SECONDS = 300
+DEFAULT_ONLYOFFICE_POLL_INTERVAL_SECONDS = 1
+DEFAULT_ONLYOFFICE_TOKEN_TTL_SECONDS = 600
 DEFAULT_RATE_LIMIT_REQUESTS = 30
 DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
 
@@ -115,6 +125,23 @@ SOFFICE_TIMEOUT_SECONDS = parse_nonnegative_int(
     os.getenv("SOFFICE_TIMEOUT_SECONDS"),
     DEFAULT_SOFFICE_TIMEOUT_SECONDS,
 )
+ONLYOFFICE_URL = os.getenv("ONLYOFFICE_URL", "").strip()
+ONLYOFFICE_PUBLIC_URL = os.getenv("ONLYOFFICE_PUBLIC_URL", "").strip()
+ONLYOFFICE_TIMEOUT_SECONDS = parse_nonnegative_int(
+    os.getenv("ONLYOFFICE_TIMEOUT_SECONDS"),
+    DEFAULT_ONLYOFFICE_TIMEOUT_SECONDS,
+)
+ONLYOFFICE_POLL_INTERVAL_SECONDS = parse_nonnegative_int(
+    os.getenv("ONLYOFFICE_POLL_INTERVAL_SECONDS"),
+    DEFAULT_ONLYOFFICE_POLL_INTERVAL_SECONDS,
+)
+ONLYOFFICE_TOKEN_TTL_SECONDS = parse_nonnegative_int(
+    os.getenv("ONLYOFFICE_TOKEN_TTL_SECONDS"),
+    max(DEFAULT_ONLYOFFICE_TOKEN_TTL_SECONDS, ONLYOFFICE_TIMEOUT_SECONDS),
+)
+ONLYOFFICE_JWT_SECRET = os.getenv("ONLYOFFICE_JWT_SECRET", "").strip()
+ONLYOFFICE_JWT_HEADER = os.getenv("ONLYOFFICE_JWT_HEADER", "").strip() or "Authorization"
+CONVERTER_BACKEND_SETTING = os.getenv("CONVERTER_BACKEND", "").strip().lower()
 RATE_LIMIT_REQUESTS = parse_nonnegative_int(
     os.getenv("RATE_LIMIT_REQUESTS"),
     DEFAULT_RATE_LIMIT_REQUESTS,
@@ -135,6 +162,11 @@ RATE_LIMIT_LOCK = threading.Lock()
 RATE_LIMIT_CLEANUP_INTERVAL_SECONDS = max(RATE_LIMIT_WINDOW_SECONDS, 1)
 RATE_LIMIT_LAST_CLEANUP = 0.0
 SOFFICE_TIMEOUT = SOFFICE_TIMEOUT_SECONDS if SOFFICE_TIMEOUT_SECONDS > 0 else None
+ONLYOFFICE_TIMEOUT = ONLYOFFICE_TIMEOUT_SECONDS if ONLYOFFICE_TIMEOUT_SECONDS > 0 else None
+if ONLYOFFICE_POLL_INTERVAL_SECONDS <= 0:
+    ONLYOFFICE_POLL_INTERVAL_SECONDS = DEFAULT_ONLYOFFICE_POLL_INTERVAL_SECONDS
+if ONLYOFFICE_TOKEN_TTL_SECONDS <= 0:
+    ONLYOFFICE_TOKEN_TTL_SECONDS = DEFAULT_ONLYOFFICE_TOKEN_TTL_SECONDS
 
 COMMON_FORMATS = [
     "pdf",
@@ -155,6 +187,19 @@ COMMON_FORMATS = [
 FORMAT_LOOKUP = {fmt: fmt for fmt in COMMON_FORMATS}
 ALLOWED_INPUT_SUFFIXES = {f".{fmt}" for fmt in COMMON_FORMATS}
 UPLOAD_STEM = "upload"
+ONLYOFFICE_FILE_TOKENS: dict[str, tuple[Path, float]] = {}
+ONLYOFFICE_FILE_LOCK = threading.Lock()
+
+
+def resolve_converter_backend() -> str:
+    if CONVERTER_BACKEND_SETTING in {"soffice", "onlyoffice"}:
+        return CONVERTER_BACKEND_SETTING
+    if ONLYOFFICE_URL:
+        return "onlyoffice"
+    return "soffice"
+
+
+ACTIVE_CONVERTER_BACKEND = resolve_converter_backend()
 
 
 def normalize_target_format(raw_value: str) -> str:
@@ -242,6 +287,203 @@ def validate_zip_payload(path: Path, require_zip: bool = False) -> None:
         raise ValueError("Zip file is invalid or corrupted.") from error
 
 
+def cleanup_onlyoffice_tokens(now: float | None = None) -> None:
+    if not ONLYOFFICE_FILE_TOKENS:
+        return
+    if now is None:
+        now = time.monotonic()
+    expired_tokens = [
+        token
+        for token, (_, expires_at) in ONLYOFFICE_FILE_TOKENS.items()
+        if expires_at <= now
+    ]
+    for token in expired_tokens:
+        ONLYOFFICE_FILE_TOKENS.pop(token, None)
+
+
+def register_onlyoffice_file(path: Path) -> str:
+    token = uuid4().hex
+    expires_at = time.monotonic() + ONLYOFFICE_TOKEN_TTL_SECONDS
+    with ONLYOFFICE_FILE_LOCK:
+        cleanup_onlyoffice_tokens()
+        ONLYOFFICE_FILE_TOKENS[token] = (path, expires_at)
+    return token
+
+
+def remove_onlyoffice_file(token: str) -> None:
+    with ONLYOFFICE_FILE_LOCK:
+        ONLYOFFICE_FILE_TOKENS.pop(token, None)
+
+
+def get_onlyoffice_file(token: str) -> Path | None:
+    now = time.monotonic()
+    with ONLYOFFICE_FILE_LOCK:
+        cleanup_onlyoffice_tokens(now)
+        entry = ONLYOFFICE_FILE_TOKENS.get(token)
+        if not entry:
+            return None
+        path, expires_at = entry
+        if expires_at <= now:
+            ONLYOFFICE_FILE_TOKENS.pop(token, None)
+            return None
+    return path
+
+
+def get_public_base_url() -> str:
+    if ONLYOFFICE_PUBLIC_URL:
+        return ONLYOFFICE_PUBLIC_URL.rstrip("/")
+    return request.url_root.rstrip("/")
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def create_onlyoffice_jwt(payload: dict) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_segment = b64url_encode(
+        json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    payload_segment = b64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signing_input = f"{header_segment}.{payload_segment}".encode("utf-8")
+    signature = hmac.new(ONLYOFFICE_JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_segment}.{payload_segment}.{b64url_encode(signature)}"
+
+
+def build_onlyoffice_headers(token: str | None = None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        header_value = token
+        if ONLYOFFICE_JWT_HEADER.lower() == "authorization":
+            header_value = f"{'Bearer'} {token}"
+        headers[ONLYOFFICE_JWT_HEADER] = header_value
+    return headers
+
+
+def request_onlyoffice_conversion(payload: dict) -> dict:
+    endpoint = f"{ONLYOFFICE_URL.rstrip('/')}/ConvertService.ashx"
+    request_payload = payload
+    token = None
+    if ONLYOFFICE_JWT_SECRET:
+        request_payload = dict(payload)
+        token = create_onlyoffice_jwt(request_payload)
+        request_payload["token"] = token
+    data = json.dumps(request_payload).encode("utf-8")
+    request_obj = urllib.request.Request(
+        endpoint,
+        data=data,
+        headers=build_onlyoffice_headers(token),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=ONLYOFFICE_TIMEOUT) as response:
+            response_data = response.read()
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(
+            f"OnlyOffice conversion request failed ({error.code}): {details or error.reason}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"OnlyOffice conversion request failed: {error.reason}") from error
+    try:
+        return json.loads(response_data.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("OnlyOffice returned invalid JSON.") from error
+
+
+def onlyoffice_conversion_complete(response: dict) -> bool:
+    end_convert = response.get("endConvert")
+    if isinstance(end_convert, bool):
+        return end_convert
+    if isinstance(end_convert, str):
+        return end_convert.lower() == "true"
+    status = response.get("status")
+    try:
+        return int(status) == 2
+    except (TypeError, ValueError):
+        return False
+
+
+def download_onlyoffice_file(file_url: str, output_path: Path) -> None:
+    headers: dict[str, str] = {}
+    if ONLYOFFICE_JWT_SECRET:
+        token = create_onlyoffice_jwt({"url": file_url})
+        if ONLYOFFICE_JWT_HEADER.lower() == "authorization":
+            headers[ONLYOFFICE_JWT_HEADER] = f"{'Bearer'} {token}"
+        else:
+            headers[ONLYOFFICE_JWT_HEADER] = token
+    request_obj = urllib.request.Request(file_url, headers=headers)
+    try:
+        with urllib.request.urlopen(request_obj, timeout=ONLYOFFICE_TIMEOUT) as response:
+            with output_path.open("wb") as output_file:
+                shutil.copyfileobj(response, output_file)
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(
+            f"OnlyOffice download failed ({error.code}): {details or error.reason}"
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"OnlyOffice download failed: {error.reason}") from error
+
+
+def convert_with_onlyoffice(
+    input_file: Path,
+    output_dir: Path,
+    target_format: str,
+    public_base_url: str,
+    original_suffix: str,
+) -> Path:
+    if not ONLYOFFICE_URL:
+        raise RuntimeError("OnlyOffice Document Server URL is not configured.")
+    if not public_base_url:
+        raise RuntimeError("Public base URL is required for OnlyOffice conversion.")
+    filetype = (original_suffix or input_file.suffix).lstrip(".").lower()
+    if not filetype:
+        raise RuntimeError("Unable to determine input file type for OnlyOffice conversion.")
+    token = register_onlyoffice_file(input_file)
+    try:
+        quoted_name = urllib.parse.quote(input_file.name)
+        file_url = f"{public_base_url}/internal/onlyoffice/{token}/{quoted_name}"
+        payload = {
+            "async": False,
+            "filetype": filetype,
+            "outputtype": target_format,
+            "title": input_file.name,
+            "url": file_url,
+        }
+        deadline = None
+        if ONLYOFFICE_TIMEOUT_SECONDS > 0:
+            deadline = time.monotonic() + ONLYOFFICE_TIMEOUT_SECONDS
+        while True:
+            response = request_onlyoffice_conversion(payload)
+            error_code = response.get("error")
+            if error_code not in (None, 0, "0", False):
+                raise RuntimeError(f"OnlyOffice conversion failed (error {error_code}).")
+            if onlyoffice_conversion_complete(response):
+                converted_url = (
+                    response.get("fileUrl")
+                    or response.get("fileURL")
+                    or response.get("file_url")
+                    or response.get("url")
+                )
+                if not converted_url:
+                    raise RuntimeError("OnlyOffice conversion did not return a file URL.")
+                parsed_path = urllib.parse.urlparse(converted_url).path
+                suffix = Path(parsed_path).suffix or f".{target_format}"
+                output_path = output_dir / f"{input_file.stem}{suffix}"
+                download_onlyoffice_file(converted_url, output_path)
+                return output_path
+            if deadline and time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"OnlyOffice conversion timed out after {ONLYOFFICE_TIMEOUT_SECONDS} seconds."
+                )
+            time.sleep(ONLYOFFICE_POLL_INTERVAL_SECONDS)
+    finally:
+        remove_onlyoffice_file(token)
+
+
 def convert_with_soffice(input_file: Path, output_dir: Path, target_format: str) -> Path:
     cmd = [
         "soffice",
@@ -316,6 +558,20 @@ def index():
     return render_index()
 
 
+@app.get("/internal/onlyoffice/<token>")
+@app.get("/internal/onlyoffice/<token>/<filename>")
+def onlyoffice_file(token: str, filename: str | None = None):
+    path = get_onlyoffice_file(token)
+    if not path or not path.exists():
+        return "Not found", 404
+    return send_file(
+        path,
+        as_attachment=False,
+        download_name=filename or path.name,
+        mimetype="application/octet-stream",
+    )
+
+
 @app.post("/convert")
 def convert():
     uploads = []
@@ -346,6 +602,11 @@ def convert():
             selected_format=target_format,
         ), 429
 
+    backend = ACTIVE_CONVERTER_BACKEND
+    public_base_url = ""
+    if backend == "onlyoffice":
+        public_base_url = get_public_base_url()
+
     working_dir = Path(tempfile.mkdtemp(prefix="soffice-convert-"))
     used_download_names: set[str] = set()
     converted_outputs: list[tuple[Path, str]] = []
@@ -375,7 +636,16 @@ def convert():
                 return render_index(error=str(error), selected_format=target_format), 400
 
             try:
-                converted_path = convert_with_soffice(input_path, output_dir, target_format)
+                if backend == "onlyoffice":
+                    converted_path = convert_with_onlyoffice(
+                        input_path,
+                        output_dir,
+                        target_format,
+                        public_base_url,
+                        original_suffix,
+                    )
+                else:
+                    converted_path = convert_with_soffice(input_path, output_dir, target_format)
             except RuntimeError as error:
                 shutil.rmtree(working_dir, ignore_errors=True)
                 return render_index(error=str(error), selected_format=target_format), 500

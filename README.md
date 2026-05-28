@@ -1,11 +1,13 @@
 # SoffConvert
 
-SoffConvert is a lightweight Flask web app for local file conversion powered by LibreOffice (`soffice`).
+SoffConvert is a lightweight Flask web app for local file conversion powered by OnlyOffice Document
+Server (recommended) or LibreOffice (`soffice`).
 Upload a document, choose an output format, and download the converted result from a simple browser UI.
 
 ## Key Features
 
-- Local conversion using your own LibreOffice installation
+- Local conversion using OnlyOffice Document Server or LibreOffice
+- Optional higher-fidelity conversions with OnlyOffice Document Server
 - Web interface for quick single or batch conversion
 - Supports common output formats (PDF, DOCX, ODT, RTF, TXT, HTML, XLSX, ODS, CSV, PPTX, ODP, PNG, JPG)
 - Uses a dropdown menu for output format selection
@@ -22,9 +24,10 @@ Upload a document, choose an output format, and download the converted result fr
 ## Requirements
 
 - Python 3.9+
-- LibreOffice installed and `soffice` available on your `PATH`
+- OnlyOffice Document Server (optional, recommended for better fidelity)
+- LibreOffice installed and `soffice` available on your `PATH` (fallback backend)
 
-Check LibreOffice availability:
+Check LibreOffice availability (fallback backend):
 
 ```bash
 soffice --version
@@ -63,6 +66,19 @@ Then open `http://127.0.0.1:5000` (or `http://localhost:5000`) in your browser.
 - `MAX_CONVERSION_WAIT_SECONDS`: how long to wait for a conversion slot before failing (default `30`).
   Set to `0` to fail fast.
 - `SOFFICE_TIMEOUT_SECONDS`: timeout for LibreOffice conversions (default `300`). Set to `0` to disable.
+- `CONVERTER_BACKEND`: set to `onlyoffice` or `soffice`. Defaults to `onlyoffice` when
+  `ONLYOFFICE_URL` is set, otherwise `soffice`.
+- `ONLYOFFICE_URL`: base URL for OnlyOffice Document Server (example: `http://localhost:8080`).
+- `ONLYOFFICE_PUBLIC_URL`: base URL for this Flask app that the Document Server can access (use this
+  when running the server in Docker or behind a reverse proxy).
+- `ONLYOFFICE_TIMEOUT_SECONDS`: timeout for OnlyOffice conversions (default `300`). Set to `0` to
+  disable.
+- `ONLYOFFICE_POLL_INTERVAL_SECONDS`: polling interval for OnlyOffice conversion completion (default
+  `1`).
+- `ONLYOFFICE_TOKEN_TTL_SECONDS`: how long conversion source files are exposed to the Document Server
+  (default `600`).
+- `ONLYOFFICE_JWT_SECRET`: JWT secret for secured OnlyOffice deployments (optional).
+- `ONLYOFFICE_JWT_HEADER`: override the JWT header name (default `Authorization`).
 - `RATE_LIMIT_REQUESTS`: requests allowed per IP within the rate-limit window (default `30`).
 - `RATE_LIMIT_WINDOW_SECONDS`: rate-limit window duration in seconds (default `60`). Set either value
   to `0` to disable rate limiting.
@@ -89,6 +105,7 @@ The app returns clear form errors for:
 - Missing file upload
 - Missing or invalid target format
 - LibreOffice conversion failures
+- OnlyOffice conversion failures
 - Missing conversion output file
 
 ## Security and Operational Notes
@@ -100,6 +117,8 @@ The app returns clear form errors for:
 - Zip uploads are inspected for total uncompressed size before processing to prevent decompression bombs.
 - Rate limiting and conversion concurrency limits are enforced in-process; use a reverse proxy for
   shared limits across multiple workers.
+- OnlyOffice conversions require the Document Server to reach the app's `/internal/onlyoffice/...`
+  endpoint. Configure `ONLYOFFICE_PUBLIC_URL` when the default URL is not reachable.
 - This app is intended for local/trusted use; add authentication and stricter controls before internet exposure.
 
 ## License
